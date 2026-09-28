@@ -1,210 +1,223 @@
-# AI-Powered Commercial RO Sales & Lead Qualification Calling Agent
+# 📞 AquaPure AI Calling Agent
 
-A complete full-stack AI calling agent for Commercial RO (Reverse Osmosis) water purification system sales. The AI agent conducts two-way voice conversations with potential customers, qualifies leads, stores transcripts, and generates AI summaries.
+**An AI voice agent that sells Commercial RO (Reverse Osmosis) water purification systems, qualifies leads, and summarizes every call.**
+
+"Priya", the AI sales agent, holds a natural two-way voice conversation with a prospect through the browser, pulls out their requirements (capacity, location, budget, timeline), saves the transcript live, and produces a structured summary for the sales team.
+
+
+
+
+## Table of Contents
+
+- Features
+- How It Works
+- Tech Stack
+- Quick Start
+- Configuration
+- Using the Voice Call
+- Example Conversation
+- API Reference
+- Agent Response Format
+- Database Schema
+- Project Structure
+- Error Handling
+- Troubleshooting
+- Free Tier Limits
+- Roadmap
 
 ---
 
-## 📋 Features
+## ✨ Features
 
-- **Two-way voice conversation** via browser microphone and speaker
-- **AI Sales Agent (Priya)** powered by Google Gemini — understands natural speech, extracts info without asking again
-- **Real-time transcript** saved to PostgreSQL during the call
-- **AI-generated call summary** with structured customer requirements
-- **Admin dashboard** with stats, call list, filters, and call detail pages
-- **Free to use** — no paid subscription required (Gemini free tier + gTTS)
+- **Two-way voice conversation** using the browser microphone and speakers
+- **Context-aware AI agent** (Google Gemini) that understands natural speech and never re-asks for information already given
+- **Live transcripts** saved to PostgreSQL turn by turn during the call
+- **AI call summaries** with structured customer requirements and lead status
+- **Admin dashboard** with stats, filterable call list, and call detail pages
+- **Runs on free tiers**: no paid subscription needed for development or demos
+- **Pluggable calling layer**: swap browser calls for Twilio, Plivo, or Vonage without touching the agent logic
 
 ---
 
-## 🏗️ Architecture
+## 🧭 How It Works
 
 ```
-Browser (Next.js)
-    ↓
-FastAPI Backend (Python)
-    ↓
-Gemini AI Agent (LLM)
-    ↓
-gTTS (Text-to-Speech) + Web Speech API (Speech-to-Text)
-    ↓
-PostgreSQL (Database)
+ Browser (Next.js)  ── mic audio ──►  FastAPI backend
+        ▲                                  │
+        │                                  ├─► faster-whisper   (speech → text)
+        │                                  ├─► Gemini agent     (reply + extracted info)
+        │                                  ├─► gTTS             (text → speech)
+        │                                  └─► PostgreSQL       (calls, transcripts, summaries)
+        └──────── MP3 reply (base64) ◄─────┘
 ```
 
----
-
-## 🛠️ Technology Stack
-
-| Component | Technology | Cost |
-|-----------|-----------|------|
-| Frontend | Next.js 14 + Tailwind CSS | Free |
-| Backend | Python + FastAPI | Free |
-| LLM | Google Gemini 1.5 Flash | Free tier |
-| Text-to-Speech | gTTS (Google TTS) | Free |
-| Speech-to-Text | Web Speech API (browser) | Free |
-| Voice/Calling | Browser (WebRTC + Web Audio) | Free |
-| Database | PostgreSQL | Free |
-| ORM | SQLAlchemy | Free |
+1. The customer speaks; the browser records the audio.
+2. The backend transcribes it and passes it, with the full conversation history, to Gemini.
+3. Gemini returns structured JSON: the spoken reply, detected intent, extracted details, and the next action.
+4. The reply is converted to MP3 and played back in the browser.
+5. When the call ends, Gemini generates the final summary and lead classification.
 
 ---
 
-## ⚙️ Setup Instructions
+## 🛠 Tech Stack
+
+| Layer | Technology |
+|---|---|---|
+| Frontend | Next.js 14, Tailwind CSS |
+| Backend | Python, FastAPI, Uvicorn | 
+| LLM | Google Gemini (free tier) | 
+| Speech-to-Text | faster-whisper (runs locally) 
+| Text-to-Speech | gTTS (fallback: browser SpeechSynthesis) 
+| Database | PostgreSQL + SQLAlchemy 
+| Telephony (optional) | Twilio 
+
+---
+
+## 🚀 Quick Start
 
 ### Prerequisites
 
 - Python 3.9+
 - Node.js 18+
 - PostgreSQL
-- Google Gemini API key (free at https://aistudio.google.com)
+- A free Gemini API key from [Google AI Studio](https://aistudio.google.com)
+- Chrome or Edge recommended (best microphone support)
 
-### 1. Clone and navigate
-
-```bash
-cd calling_agent
-```
-
-### 2. Set up PostgreSQL
-
-Create the database:
+### 1. Create the database
 
 ```sql
 CREATE DATABASE ro_calling_agent;
 ```
 
-### 3. Set up Backend
+Tables are created automatically on first backend startup.
+
+### 2. Start the backend
 
 ```bash
 cd backend
+python -m venv venv
+
+# macOS / Linux
+source venv/bin/activate
+# Windows
+venv\Scripts\activate
+
 pip install -r requirements.txt
+cp .env.example .env        # Windows: copy .env.example .env
 ```
 
-Copy the environment file and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```env
-GEMINI_API_KEY=your_actual_gemini_api_key
-DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/ro_calling_agent
-CALLING_MODE=browser
-```
-
-Start the backend:
-
-```bash
-python main.py
-```
-
-Or with uvicorn directly:
+Edit `.env` (see [Configuration](#-configuration)), then run:
 
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The API will be available at: http://localhost:8000
+- API: http://localhost:8000
+- Interactive docs: http://localhost:8000/docs
 
-API documentation: http://localhost:8000/docs
-
-### 4. Set up Frontend
+### 3. Start the frontend
 
 ```bash
 cd frontend
-```
-
-The `.env.local` file is already created with:
-
-```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-
-Install dependencies and start:
-
-```bash
 npm install
 npm run dev
 ```
 
-The dashboard will be at: http://localhost:3000
+Dashboard: http://localhost:3000
 
 ---
 
-## 🎤 How to Use Browser Voice Mode
+## ⚙️ Configuration
+
+**`backend/.env`**
+
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | ✅ | Your Google Gemini API key |
+| `DATABASE_URL` | ✅ | e.g. `postgresql://postgres:password@localhost:5432/ro_calling_agent` |
+| `CALLING_MODE` | ✅ | `browser` (default) or `twilio` |
+| `TWILIO_ACCOUNT_SID` | Twilio only | From your Twilio console |
+| `TWILIO_AUTH_TOKEN` | Twilio only | From your Twilio console |
+| `TWILIO_PHONE_NUMBER` | Twilio only | Your Twilio number |
+
+**`frontend/.env.local`**
+
+```
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+> ⚠️ Never commit `.env` files. Make sure they are listed in `.gitignore`.
+
+---
+
+## 🎤 Using the Voice Call
 
 1. Open http://localhost:3000
-2. Click **"Start AI Call"** button
-3. (Optional) Enter customer name and phone
-4. Click **"Start AI Call"** in the modal
-5. Allow microphone access when prompted
-6. The AI (Priya) will greet you — wait for her to finish
-7. Speak naturally — describe your RO requirements
-8. The AI will respond through your speakers
-9. Conversation continues until complete
-10. Click **"End Call"** when done
-11. View call details, transcript, and AI summary
+2. Click **Start AI Call**
+3. *(Optional)* Enter the customer's name and phone number
+4. Confirm in the modal and **allow microphone access**
+5. Wait for Priya to finish her greeting
+6. Speak naturally and describe your requirements
+7. Priya replies through your speakers; the conversation continues until complete
+8. Click **End Call**
+9. Review the transcript and AI summary on the call detail page
+
+**Tips:** use headphones to prevent the agent's voice feeding back into the mic, and speak after the greeting ends.
 
 ---
 
-## 🗣️ Example Demo Conversation
+## 🗣 Example Conversation
 
-**AI:** Hello! I'm Priya calling from AquaPure Commercial RO Systems. Are you looking for a water purification system for your business?
-
-**Customer:** Yes, I need a commercial RO system for my hotel in Bangalore. 500 LPH capacity, budget around one lakh.
-
-**AI:** That's great! A 500 LPH system would work well for a hotel. What's your purchase timeline — are you looking to install this soon?
-
-**Customer:** Within the next month.
-
-**AI:** Perfect. Just to confirm — you need a 500 LPH commercial RO system for your hotel in Bangalore, with a budget of ₹1,00,000 and you plan to purchase within a month. Is that correct?
-
-**Customer:** Yes, that's right.
-
-**AI:** Wonderful! We have excellent solutions for hotel applications. Our team will prepare a customized quote for you. Thank you for your time, and we'll be in touch soon!
+> **Priya:** Hello! I'm Priya calling from AquaPure Commercial RO Systems. Are you looking for a water purification system for your business?
+>
+> **Customer:** Yes, I need a commercial RO system for my hotel in Bangalore. 500 LPH capacity, budget around one lakh.
+>
+> **Priya:** That's great! A 500 LPH system would work well for a hotel. What's your purchase timeline: are you looking to install this soon?
+>
+> **Customer:** Within the next month.
+>
+> **Priya:** Perfect. Just to confirm: a 500 LPH commercial RO system for your hotel in Bangalore, budget of ₹1,00,000, purchase within a month. Is that correct?
+>
+> **Customer:** Yes, that's right.
+>
+> **Priya:** Wonderful! Our team will prepare a customized quote for you. Thank you for your time, and we'll be in touch soon!
 
 ---
 
-## 🔌 API Endpoints
+## 🔌 API Reference
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/calls/start` | Start a new call session |
-| POST | `/calls/{id}/message` | Send customer message, get AI response |
-| POST | `/calls/{id}/end` | End call, generate summary |
-| GET | `/calls/{id}/audio` | Get TTS audio for text |
-| GET | `/calls` | List all calls (with filters) |
-| GET | `/calls/{id}` | Get call details + transcript + summary |
-| GET | `/dashboard/stats` | Get dashboard statistics |
-| GET | `/health` | Health check |
+|---|---|---|
+| `POST` | `/calls/start` | Start a new call session |
+| `POST` | `/calls/{id}/message` | Send a customer message, get the AI response |
+| `POST` | `/calls/{id}/end` | End the call and generate the summary |
+| `GET` | `/calls/{id}/audio` | Get TTS audio for a piece of text |
+| `GET` | `/calls` | List calls (supports filters below) |
+| `GET` | `/calls/{id}` | Call details, transcript, and summary |
+| `GET` | `/dashboard/stats` | Dashboard statistics |
+| `GET` | `/health` | Health check |
 
-### Filter Parameters for GET /calls
+### Filters for `GET /calls`
 
-- `status` — completed, failed, active, etc.
-- `lead_status` — interested, not_interested, maybe, etc.
-- `follow_up` — true/false
-- `customer_name` — partial name search
-- `outcome` — sale_prospect, not_interested, etc.
-- `date_from` — ISO date string
-- `date_to` — ISO date string
-- `page` — page number (default: 1)
-- `page_size` — results per page (default: 20)
+| Parameter | Example values |
+|---|---|
+| `status` | `completed`, `failed`, `active` |
+| `lead_status` | `interested`, `not_interested`, `maybe` |
+| `follow_up` | `true` / `false` |
+| `customer_name` | partial name search |
+| `outcome` | `sale_prospect`, `not_interested` |
+| `date_from`, `date_to` | ISO date strings |
+| `page` | default `1` |
+| `page_size` | default `20` |
+
+Full interactive documentation is available at `/docs` while the backend is running.
 
 ---
 
-## 🧠 AI Agent Details
+## 🧠 Agent Response Format
 
-### LLM Used
-- **Google Gemini 1.5 Flash** via `google-generativeai` Python package
-- Free tier: 15 requests/minute, 1 million tokens/day
-- Get API key: https://aistudio.google.com
+On every turn the agent returns structured JSON, which keeps extraction reliable and lets the UI react to the next action:
 
-### How the Agent Works
-1. Maintains conversation history
-2. Tracks extracted customer information
-3. Returns structured JSON with response + extracted info + next action
-4. Never asks for information already provided
-5. Adapts dynamically to conversation flow
-
-### Structured Response Format
 ```json
 {
   "response": "What capacity are you looking for?",
@@ -223,63 +236,20 @@ The dashboard will be at: http://localhost:3000
 }
 ```
 
----
-
-## 🗄️ Database Schema
-
-```sql
--- customers: stores customer information
--- calls: stores call records with status and lead info
--- transcripts: stores every message with speaker and timestamp
--- call_summaries: stores AI-generated summary and extracted requirements
-```
-
-Tables are auto-created on backend startup via SQLAlchemy.
+The agent keeps the full conversation history, tracks what it already knows, and falls back to a safe response if the model returns malformed JSON.
 
 ---
 
-## 🔊 Speech Technology
+## 🗄 Database Schema
 
-### Speech-to-Text (STT)
-- **Technology:** Web Speech API (browser built-in)
-- **Cost:** Completely FREE — no API key
-- **Limitation:** Chrome/Edge work best; Firefox has limited support
-- **Language:** English (India) — `en-IN`
+| Table | Purpose |
+|---|---|
+| `customers` | Customer details |
+| `calls` | Call records with status and lead info |
+| `transcripts` | Every message with speaker and timestamp |
+| `call_summaries` | AI summary and extracted requirements |
 
-### Text-to-Speech (TTS)
-- **Primary:** gTTS (Google Text-to-Speech) — server-side, FREE, no API key
-- **Fallback:** Web Speech API SpeechSynthesis (browser built-in)
-- **Format:** MP3 audio streamed as base64
-
----
-
-## 📞 Calling Modes
-
-### Browser Mode (Default, Free)
-- Uses browser microphone and speaker
-- No real phone call
-- Perfect for development and demo
-- Set `CALLING_MODE=browser` in `.env`
-
-### Twilio Mode (Optional, Paid)
-To add real phone calling later:
-1. Get a Twilio account at twilio.com
-2. Set `CALLING_MODE=twilio` in `.env`
-3. Fill in `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`
-4. The AI agent code does not need to change — only the calling layer
-
----
-
-## 🚨 Error Handling
-
-| Scenario | Handling |
-|----------|----------|
-| Customer silence | Prompt after 8s, end after second silence |
-| STT failure | Show error, retry or end call gracefully |
-| LLM/API failure | Fallback response, record error |
-| LLM JSON error | Safe fallback, continue conversation |
-| Call disconnect | Save transcript collected so far |
-| Backend down | Frontend shows clear error message |
+Managed with SQLAlchemy; tables are auto-created at startup.
 
 ---
 
@@ -288,53 +258,101 @@ To add real phone calling later:
 ```
 calling_agent/
 ├── backend/
-│   ├── main.py          # FastAPI app + all endpoints
-│   ├── database.py      # SQLAlchemy setup
-│   ├── models.py        # Database models
-│   ├── schemas.py       # Pydantic schemas
-│   ├── ai_agent.py      # Gemini AI agent logic
-│   ├── speech.py        # gTTS text-to-speech
-│   ├── calling.py       # Calling service (browser/Twilio)
+│   ├── main.py            # FastAPI app and endpoints
+│   ├── database.py        # SQLAlchemy setup
+│   ├── models.py          # Database models
+│   ├── schemas.py         # Pydantic schemas
+│   ├── ai_agent.py        # Gemini agent logic
+│   ├── speech.py          # Speech-to-text and gTTS text-to-speech
+│   ├── calling.py         # Calling service (browser / Twilio)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 │   ├── app/
-│   │   ├── page.tsx           # Dashboard
+│   │   ├── page.tsx            # Dashboard
 │   │   ├── calls/
-│   │   │   ├── page.tsx       # Calls list with filters
-│   │   │   └── [id]/page.tsx  # Call detail page
+│   │   │   ├── page.tsx        # Call list with filters
+│   │   │   └── [id]/page.tsx   # Call detail
 │   │   ├── layout.tsx
 │   │   └── globals.css
 │   ├── components/
-│   │   └── VoiceCallModal.tsx # Voice calling interface
+│   │   └── VoiceCallModal.tsx  # Voice calling interface
 │   ├── lib/
-│   │   └── api.ts             # API helper functions
+│   │   └── api.ts              # API helpers
 │   └── .env.local
 └── README.md
 ```
 
 ---
 
-## 🆓 Free Tier Limitations
+## 🚨 Error Handling
 
-| Service | Free Limit |
-|---------|-----------|
-| Gemini 1.5 Flash | 15 RPM, 1M tokens/day |
-| gTTS | Unlimited (uses Google Translate TTS) |
-| Web Speech API | Unlimited (browser built-in) |
-| PostgreSQL | Unlimited (self-hosted) |
-
-All features work within the free tier for development and demo purposes.
+| Scenario | Behavior |
+|---|---|
+| Customer silence | Prompt after 8s; end the call after a second silence |
+| Speech recognition failure | Show an error, retry or end gracefully |
+| LLM / API failure | Fallback response; error recorded |
+| Malformed LLM JSON | Safe fallback; conversation continues |
+| Call disconnect | Transcript collected so far is saved |
+| Backend down | Frontend shows a clear error message |
 
 ---
 
-## 🔧 Optional: Adding Real Telephony
+## ☎️ Adding Real Phone Calls (Twilio)
 
-The `calling.py` module provides a clean interface. To add Twilio:
+The agent, transcript, and summary logic don't change; only the calling layer does.
 
-1. `pip install twilio`
-2. Set `CALLING_MODE=twilio` in `.env`
-3. Fill in Twilio credentials
-4. The AI agent, transcript, and summary logic remain unchanged
+```bash
+pip install twilio
+```
 
-For other providers (Plivo, Vonage, etc.), implement a new class following the same `start_call()`, `end_call()`, `get_call_status()` interface in `calling.py`.
+Then in `.env`:
+
+```
+CALLING_MODE=twilio
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_PHONE_NUMBER=...
+```
+
+For other providers (Plivo, Vonage, etc.), add a class in `calling.py` implementing `start_call()`, `end_call()`, and `get_call_status()`.
+
+---
+
+## 🩺 Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Empty or silent transcription | Check the browser has mic permission and the correct input device; confirm the recording isn't empty before it is sent; try Chrome or Edge |
+| `429` / quota errors from Gemini | You've hit the free-tier rate limit; wait a minute or reduce request frequency |
+| Model not found error | Set a currently available Gemini model in `ai_agent.py` (older model names get retired) |
+| Database connection refused | Verify PostgreSQL is running and `DATABASE_URL` credentials are correct |
+| Frontend can't reach backend | Check `NEXT_PUBLIC_API_URL` and that the backend is on port 8000 |
+| No audio playback | Interact with the page first (browsers block autoplay); check speaker output |
+
+---
+
+## 🆓 Free Tier Limits
+
+| Service | Limit |
+|---|---|
+| Gemini API | Rate-limited per minute and per day; check [Google AI Studio](https://aistudio.google.com) for current quotas |
+| gTTS | Unofficial Google Translate endpoint; fine for demos, not guaranteed for production |
+| faster-whisper | Runs locally; limited only by your hardware |
+| PostgreSQL | Self-hosted, unlimited |
+
+---
+
+## 🗺 Roadmap
+
+- [ ] Authentication for the admin dashboard
+- [ ] Real telephony via Twilio
+- [ ] Multi-language support (Hindi, Kannada, Tamil)
+- [ ] CRM / WhatsApp follow-up integration
+- [ ] Docker Compose for one-command setup
+
+---
+
+## 📄 License
+
+Add your license here (e.g. MIT).
