@@ -12,6 +12,7 @@ class StartCallResponse(BaseModel):
     call_id: int
     customer_id: int
     ai_greeting: str
+    call_mode: str = "browser"
 
 
 class MessageRequest(BaseModel):

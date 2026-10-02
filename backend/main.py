@@ -1,10 +1,13 @@
 import os
 import re
 import logging
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File
+from fastapi import Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 from dotenv import load_dotenv
@@ -20,6 +23,7 @@ from ai_agent import get_ai_response, get_opening_greeting, generate_call_summar
 from speech import get_tts_audio, transcribe_audio_bytes
 from calling import get_calling_service
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MAX_AUDIO_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -67,6 +71,159 @@ def is_valid_phone(phone: Optional[str]) -> bool:
     return bool(re.fullmatch(r"\d{10}", cleaned))
 
 
+def _clean_env(name: str) -> str:
+    """Read an env var and strip whitespace and stray quotes."""
+    return os.getenv(name, "").strip().strip('"').strip("'")
+
+
+def _twilio_signature_is_valid(request: Request, params) -> bool:
+    from twilio.request_validator import RequestValidator
+
+    # Dev-only switch: set TWILIO_VALIDATE_SIGNATURE=false in .env to skip the check
+    if _clean_env("TWILIO_VALIDATE_SIGNATURE").lower() == "false":
+        logger.warning(
+            "Twilio signature validation is DISABLED (development only)")
+        return True
+
+    auth_token = _clean_env("TWILIO_AUTH_TOKEN")
+    public_url = _clean_env("TWILIO_WEBHOOK_URL").rstrip("/")
+    signature = request.headers.get("X-Twilio-Signature", "")
+
+    missing = [
+        n for n, v in (
+            ("TWILIO_AUTH_TOKEN", auth_token),
+            ("TWILIO_WEBHOOK_URL", public_url),
+            ("X-Twilio-Signature header", signature),
+        ) if not v
+    ]
+    if missing:
+        logger.warning("Twilio webhook rejected: missing %s",
+                       ", ".join(missing))
+        return False
+
+    public_parts = urlsplit(public_url)
+    raw_path = request.scope.get(
+        "raw_path", request.url.path.encode("latin-1")).decode("latin-1")
+    raw_query = request.scope.get("query_string", b"").decode("latin-1")
+    request_target = raw_path + (f"?{raw_query}" if raw_query else "")
+
+    base = urlunsplit(
+        (public_parts.scheme, public_parts.netloc, raw_path, raw_query, ""))
+    callback_urls = {base, str(request.url)}
+
+    # Twilio may sign the URL with an explicit :443 port
+    if public_parts.scheme == "https" and public_parts.port is None:
+        callback_urls.add(urlunsplit(
+            (public_parts.scheme, f"{public_parts.netloc}:443", raw_path, raw_query, "")))
+
+    forwarded_host = request.headers.get(
+        "x-forwarded-host", "").split(",")[0].strip()
+    forwarded_proto = request.headers.get(
+        "x-forwarded-proto", "https").split(",")[0].strip()
+    if forwarded_host:
+        callback_urls.add(
+            f"{forwarded_proto}://{forwarded_host}{request_target}")
+    original_url = request.headers.get("x-original-url")
+    if original_url and original_url.startswith("https://"):
+        callback_urls.add(original_url)
+
+    # Try the form as received and as a plain str dict
+    plain_params = {k: str(v) for k, v in params.items()}
+    validator = RequestValidator(auth_token)
+    is_valid = any(
+        validator.validate(url, p, signature)
+        for url in callback_urls
+        for p in (params, plain_params)
+    )
+
+    if not is_valid:
+        logger.warning(
+            "Twilio signature mismatch on %s | token_len=%d | tried=%s | param_keys=%s",
+            request.url.path, len(auth_token), sorted(
+                callback_urls), sorted(plain_params.keys()),
+        )
+    return is_valid
+
+
+async def _twilio_request_is_authentic(request: Request, params, call_id: int) -> bool:
+    """
+    1) Accept a correctly signed Twilio request.
+    2) If a signature is present but wrong, reject.
+    3) If NO signature is present, accept only when Twilio's own API confirms the
+       CallSid is a live call on our account (and matches the call we started).
+    """
+    if _twilio_signature_is_valid(request, params):
+        return True
+    if request.headers.get("X-Twilio-Signature"):
+        return False
+
+    call_sid = (params.get("CallSid") or "").strip()
+    account_sid = _clean_env("TWILIO_ACCOUNT_SID")
+    if not call_sid or not account_sid or params.get("AccountSid") != account_sid:
+        return False
+
+    expected_sid = active_calls.get(call_id, {}).get("provider_call_id")
+    if expected_sid and expected_sid != call_sid:
+        logger.warning(
+            "Unsigned Twilio request rejected: CallSid does not match call %s", call_id)
+        return False
+
+    try:
+        from twilio.rest import Client
+        client = Client(account_sid, _clean_env("TWILIO_AUTH_TOKEN"))
+        remote = await run_in_threadpool(lambda: client.calls(call_sid).fetch())
+    except Exception as exc:
+        logger.warning(
+            "Unsigned Twilio request rejected: API lookup failed (%s)", type(exc).__name__)
+        return False
+
+    ok = (
+        remote.account_sid == account_sid
+        and remote.status in ("queued", "ringing", "in-progress")
+    )
+    if ok:
+        logger.info(
+            "Unsigned Twilio request for call %s accepted after API verification", call_id)
+    else:
+        logger.warning(
+            "Unsigned Twilio request rejected: call status is %s", remote.status)
+    return ok
+
+
+def _end_call_in_background(call_id: int, reason: str):
+    """Finish the call (save status + Gemini summary) after Twilio already got its TwiML."""
+    gen = get_db()
+    db = next(gen)
+    try:
+        call = db.query(Call).filter(Call.id == call_id).first()
+        if call and call.status in ["active", "connected"]:
+            end_call(call_id, EndCallRequest(reason=reason), db)
+    except Exception:
+        logger.exception("Background end_call failed for call %s", call_id)
+    finally:
+        gen.close()
+
+
+def _twilio_gather(response, prompt: str, call_id: int):
+    from twilio.twiml.voice_response import Gather
+
+    public_url = _clean_env("TWILIO_WEBHOOK_URL").rstrip("/")
+    gather = Gather(
+        input="speech",
+        action=f"{public_url}/twilio/respond?call_id={call_id}",
+        method="POST",
+        language="en-IN",
+        speech_timeout="auto",
+        timeout=8,
+        action_on_empty_result=True,
+    )
+    gather.say(prompt, language="en-IN")
+    response.append(gather)
+    response.say("I didn't hear anything. Goodbye.", language="en-IN")
+    response.hangup()
+    return response
+
+
 @app.on_event("startup")
 def startup():
     """Create database tables on startup."""
@@ -110,6 +267,11 @@ def start_call(request: StartCallRequest, db: Session = Depends(get_db)):
             detail="Invalid phone number. Use 10 digits (e.g. 9876543210) or E.164 (+919876543210).",
         )
 
+    call_mode = os.getenv("CALLING_MODE", "browser").lower()
+    if call_mode == "twilio" and not request.customer_phone:
+        raise HTTPException(
+            status_code=400, detail="A phone number is required for Twilio calls")
+
     customer = Customer(
         name=request.customer_name,
         phone=request.customer_phone
@@ -126,12 +288,6 @@ def start_call(request: StartCallRequest, db: Session = Depends(get_db)):
     db.add(call)
     db.commit()
     db.refresh(call)
-
-    calling_service = get_calling_service()
-    calling_service.start_call(
-        customer_phone=request.customer_phone,
-        customer_name=request.customer_name
-    )
 
     greeting_response = get_opening_greeting()
     ai_greeting = greeting_response.get(
@@ -162,11 +318,152 @@ def start_call(request: StartCallRequest, db: Session = Depends(get_db)):
     db.add(transcript_entry)
     db.commit()
 
+    if call_mode == "twilio":
+        phone = re.sub(r"[\s\-()]", "", request.customer_phone)
+        if not phone.startswith("+"):
+            phone = "+" + ("91" + phone if len(phone) == 10 else phone)
+        calling_service = get_calling_service()
+        result = calling_service.start_call(
+            customer_phone=phone,
+            customer_name=request.customer_name,
+            call_id=call.id,
+        )
+        active_calls[call.id]["provider_call_id"] = result.get(
+            "provider_call_id")
+    else:
+        calling_service = get_calling_service()
+        calling_service.start_call(
+            customer_phone=request.customer_phone,
+            customer_name=request.customer_name
+        )
+
     return StartCallResponse(
         call_id=call.id,
         customer_id=customer.id,
-        ai_greeting=ai_greeting
+        ai_greeting=ai_greeting,
+        call_mode=call_mode
     )
+
+
+@app.post("/twilio/voice")
+async def twilio_voice(call_id: int, request: Request, db: Session = Depends(get_db)):
+    from twilio.twiml.voice_response import VoiceResponse
+
+    params = await request.form()
+    if not await _twilio_request_is_authentic(request, params, call_id):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    call = db.query(Call).filter(Call.id == call_id).first()
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    greeting = db.query(Transcript).filter(
+        Transcript.call_id == call_id, Transcript.speaker == "AI"
+    ).order_by(Transcript.timestamp.asc()).first()
+    twiml = _twilio_gather(
+        VoiceResponse(),
+        greeting.message if greeting else "Hello! I'm calling about commercial RO systems. Are you interested?",
+        call_id,
+    )
+    return Response(content=str(twiml), media_type="application/xml")
+
+
+@app.post("/twilio/respond")
+async def twilio_respond(call_id: int, request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    from twilio.twiml.voice_response import VoiceResponse
+
+    params = await request.form()
+    if not await _twilio_request_is_authentic(request, params, call_id):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    call = db.query(Call).filter(Call.id == call_id).first()
+    if not call or call.status not in ["active", "connected"]:
+        response = VoiceResponse()
+        response.say("This call has ended. Goodbye.", language="en-IN")
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+    user_message = (params.get("SpeechResult") or "").strip()
+    if not user_message:
+        return Response(
+            content=str(_twilio_gather(
+                VoiceResponse(), "Sorry, I didn't catch that. Please say that again.", call_id)),
+            media_type="application/xml",
+        )
+
+    call_state = active_calls.get(call_id)
+    if call_state is None:
+        previous = db.query(Transcript).filter(
+            Transcript.call_id == call_id
+        ).order_by(Transcript.timestamp.asc()).all()
+        history = [
+            {"role": "model" if item.speaker ==
+                "AI" else "user", "parts": [item.message]}
+            for item in previous
+        ]
+        call_state = {
+            "history": history,
+            "extracted_info": {
+                "name": None, "requirement": None, "capacity": None,
+                "location": None, "application": None, "budget": None, "timeline": None,
+            },
+            "customer_intent": "information_needed",
+        }
+        active_calls[call_id] = call_state
+
+    db.add(Transcript(
+        call_id=call_id,
+        speaker="Customer",
+        message=user_message,
+        timestamp=datetime.now(timezone.utc),
+    ))
+    call_state["history"].append({"role": "user", "parts": [user_message]})
+    ai_result = get_ai_response(
+        conversation_history=call_state["history"],
+        extracted_info=call_state["extracted_info"],
+        customer_intent=call_state["customer_intent"],
+    )
+    ai_response_text = ai_result.get(
+        "response", "Could you please repeat that?")
+    call_state["customer_intent"] = ai_result.get(
+        "customer_intent", call_state["customer_intent"])
+    call_state["extracted_info"] = ai_result.get(
+        "extracted_information", call_state["extracted_info"])
+    call_state["history"].append(
+        {"role": "model", "parts": [ai_response_text]})
+    db.add(Transcript(
+        call_id=call_id,
+        speaker="AI",
+        message=ai_response_text,
+        timestamp=datetime.now(timezone.utc),
+    ))
+    call.lead_status = call_state["customer_intent"]
+    db.commit()
+
+    response = VoiceResponse()
+    if ai_result.get("call_should_end", False):
+        response.say(ai_response_text, language="en-IN")
+        response.hangup()
+        call_state.pop("provider_call_id", None)
+        background_tasks.add_task(
+            _end_call_in_background, call_id, "completed")
+    else:
+        _twilio_gather(response, ai_response_text, call_id)
+    return Response(content=str(response), media_type="application/xml")
+
+
+@app.post("/twilio/status")
+async def twilio_status(call_id: int, request: Request, db: Session = Depends(get_db)):
+    params = await request.form()
+    if not _twilio_signature_is_valid(request, params):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    if params.get("CallStatus") in ["completed", "busy", "failed", "no-answer", "canceled"]:
+        reason = "completed" if params.get(
+            "CallStatus") == "completed" else "no_answer"
+        call = db.query(Call).filter(Call.id == call_id).first()
+        if call and call.status in ["active", "connected"]:
+            active_calls.get(call_id, {}).pop("provider_call_id", None)
+            end_call(call_id, EndCallRequest(reason=reason), db)
+    return {"ok": True}
 
 
 @app.post("/calls/{call_id}/message", response_model=MessageResponse)
@@ -305,6 +602,11 @@ def end_call(call_id: int, request: EndCallRequest, db: Session = Depends(get_db
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
 
+    call_state = active_calls.get(call_id, {})
+    provider_call_id = call_state.get("provider_call_id")
+    if provider_call_id and os.getenv("CALLING_MODE", "browser").lower() == "twilio":
+        get_calling_service().end_call(provider_call_id)
+
     now = datetime.now(timezone.utc)
     start_time = call.start_time
     if start_time.tzinfo is None:
@@ -318,7 +620,6 @@ def end_call(call_id: int, request: EndCallRequest, db: Session = Depends(get_db
     if call.status != "completed":
         call.failure_reason = reason
 
-    call_state = active_calls.get(call_id, {})
     extracted_info = call_state.get("extracted_info", {})
     customer_intent = call_state.get("customer_intent", "information_needed")
 

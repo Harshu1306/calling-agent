@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { startCall, sendMessage, endCall, getCallAudio, transcribeAudio } from "@/lib/api";
+import { startCall, sendMessage, endCall, getCallAudio, transcribeAudio, getCallDetail } from "@/lib/api";
 
 interface TranscriptLine {
   speaker: "AI" | "Customer";
@@ -72,6 +72,7 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [showForm, setShowForm] = useState(true);
+  const [isTwilioCall, setIsTwilioCall] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [, setSilenceCount] = useState(0);
 
@@ -109,6 +110,20 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  useEffect(() => {
+    if (!isTwilioCall || !callId || phase === "ended") return;
+    const timer = window.setInterval(() => {
+      getCallDetail(callId).then((detail) => {
+        if (detail.status !== "active" && detail.status !== "connected") {
+          setPhase("ended");
+          setStatusText(detail.status === "no_answer" ? "Call was not answered." : "Phone call ended.");
+          onCallEnded();
+        }
+      }).catch(() => {});
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [isTwilioCall, callId, phase, onCallEnded]);
 
   const stopSpeaking = useCallback(() => {
     if (audioRef.current) {
@@ -635,13 +650,6 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
 
   /** Start the call flow */
   const handleStartCall = async () => {
-    if (!isRecordingSupported()) {
-      showError(
-        "Your browser doesn't support audio recording. Please use a recent version of Chrome, Edge, Firefox, or Safari."
-      );
-      return;
-    }
-
     const phone = customerPhone.trim();
     if (phone && !/^(\+\d{10,15}|\d{10}|91\d{10})$/.test(phone.replace(/[\s\-()]/g, ""))) {
       showError("Invalid phone. Use 10 digits or +91… format.");
@@ -656,12 +664,24 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
     messageInFlightRef.current = false;
 
     try {
-      // Ask for microphone permission up front so the customer sees the
-      // browser prompt before the call flow gets going.
-      await getMicStream();
-
       const data = await startCall(customerName || undefined, phone || undefined);
       setCallId(data.call_id);
+
+      if (data.call_mode === "twilio") {
+        setIsTwilioCall(true);
+        addTranscriptLine("AI", data.ai_greeting);
+        setPhase("listening");
+        setStatusText("Calling your phone. Answer the call to talk with Priya.");
+        setShowForm(false);
+        return;
+      }
+
+      if (!isRecordingSupported()) {
+        throw new Error("Your browser doesn't support audio recording. Please use a recent version of Chrome, Edge, Firefox, or Safari.");
+      }
+
+      // Ask for microphone permission before starting the browser call flow.
+      await getMicStream();
       setPhase("greeting");
       setStatusText("AI is greeting...");
 
@@ -748,7 +768,7 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
                   />
                 </div>
                 <div>
-                  <label className="text-sm text-gray-600 mb-1 block">Phone Number</label>
+                  <label className="text-sm text-gray-600 mb-1 block">Phone Number (required for Twilio)</label>
                   <input
                     type="text"
                     value={customerPhone}
@@ -756,6 +776,7 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
                     placeholder="e.g., 9876543210"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                  <p className="text-xs text-gray-500 mt-1">Use your verified phone number for trial calls.</p>
                 </div>
               </div>
               <button
@@ -765,7 +786,7 @@ export default function VoiceCallModal({ onClose, onCallEnded }: VoiceCallModalP
                 <span>📞</span> Start AI Call
               </button>
               <p className="text-xs text-gray-500 text-center mt-2">
-                Browser will ask for microphone permission
+                Browser calls use your microphone; Twilio mode rings the entered phone number.
               </p>
             </div>
           )}
